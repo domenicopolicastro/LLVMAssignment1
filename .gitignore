@@ -1,0 +1,10 @@
+# Ignora la cartella di build di CMake
+build/
+
+# Ignora i file di libreria dinamica e gli object file
+*.so
+*.o
+*.dylib
+
+# Ignora file specifici di VSCode
+.vscode/
