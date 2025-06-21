@@ -12,3 +12,8 @@ int strength_reduction_test(int x) {
     int z = y / 8;  // Pattern per la divisione
     return z;
 }
+int multi_instruction_opt_test(int b) {
+    int a = b + 1;
+    int c = a - 1; // Questa sequenza deve diventare c = b
+    return c;
+}

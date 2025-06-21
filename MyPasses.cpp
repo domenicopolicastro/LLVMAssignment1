@@ -7,6 +7,57 @@
 
 using namespace llvm;
 
+struct MultiInstructionOptPass : public PassInfoMixin<MultiInstructionOptPass> {
+    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+        std::vector<Instruction*> toErase;
+        Instruction* prevInst = nullptr;
+
+        for (auto &BB : F) {
+            for (auto &I : BB) {
+                if (!prevInst) {
+                    prevInst = &I;
+                    continue;
+                }     
+                if (I.getOpcode() == Instruction::Sub) {
+                    if (auto *C = dyn_cast<ConstantInt>(I.getOperand(1))) {
+                        if (C->isOne()) {
+                            if (I.getOperand(0) == prevInst) {
+                                if (prevInst->getOpcode() == Instruction::Add) {
+                                    if (auto *C2 = dyn_cast<ConstantInt>(prevInst->getOperand(1))) {
+                                        if (C2->isOne()) {
+                                            errs() << "Trovato pattern (b+1)-1\n";
+                                            
+                                            Value *b = prevInst->getOperand(0);
+
+                                            I.replaceAllUsesWith(b);
+
+                                            toErase.push_back(&I);
+                                            
+                                            if (prevInst->user_empty()) {
+                                                toErase.push_back(prevInst);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                prevInst = &I;
+            }
+            prevInst = nullptr; 
+        }
+
+        for (Instruction *I : toErase) {
+            I->eraseFromParent();
+        }
+
+        return toErase.empty() ? PreservedAnalyses::all() : PreservedAnalyses::none();
+    }
+};
+
+
 struct StrengthReductionPass : public PassInfoMixin<StrengthReductionPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         
@@ -155,9 +206,14 @@ llvmGetPassPluginInfo() {
                         FPM.addPass(StrengthReductionPass());
                         return true;
                     }
+                    if (Name == "multi-instruction-opt"){
+                        FPM.addPass(MultiInstructionOptPass());
+                        return true;
+                    }
                     if (Name == "all-opts") {
                         FPM.addPass(AlgebraicIdentityPass());
                         FPM.addPass(StrengthReductionPass());
+                        FPM.addPass(MultiInstructionOptPass());
                         return true;
                     }
                     return false;
