@@ -7,6 +7,68 @@
 
 using namespace llvm;
 
+struct StrengthReductionPass : public PassInfoMixin<StrengthReductionPass> {
+    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+        
+        std::vector<Instruction*> toErase;
+
+        for (auto &BB : F) {
+            for (auto &I : BB) {
+                if (auto *op = dyn_cast<BinaryOperator>(&I)) {
+                    
+                    if (op->getOpcode() == Instruction::Mul) {
+                        ConstantInt *C = nullptr;
+                        Value *X = nullptr;
+
+                        if ((C = dyn_cast<ConstantInt>(op->getOperand(0))) && C->getSExtValue() == 15) {
+                            X = op->getOperand(1);
+                        } else if ((C = dyn_cast<ConstantInt>(op->getOperand(1))) && C->getSExtValue() == 15) {
+                            X = op->getOperand(0);
+                        }
+
+                        if (X) { 
+                            IRBuilder<> Builder(&I);
+                            
+                            Value *Shift = Builder.CreateShl(X, 4);      
+                            Value *Sub = Builder.CreateSub(Shift, X); 
+
+                            op->replaceAllUsesWith(Sub);
+
+                            toErase.push_back(op);
+                        }
+                    }
+                    
+                    else if (op->getOpcode() == Instruction::SDiv) { 
+                        if (auto *C = dyn_cast<ConstantInt>(op->getOperand(1))) {
+                            int64_t Divisor = C->getSExtValue();
+
+                            if (Divisor > 0 && isPowerOf2_64(Divisor)) {
+                                errs() << "Trovata divisione per potenza di 2: " << I << "\n";
+  
+                                uint64_t ShiftAmt = Log2_64(Divisor);
+
+                                IRBuilder<> Builder(&I);
+                                Value* X = op->getOperand(0); 
+
+                                Value* Shift = Builder.CreateAShr(X, ShiftAmt); 
+
+                                op->replaceAllUsesWith(Shift);
+                                toErase.push_back(op);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        for (Instruction *I : toErase) {
+            I->eraseFromParent();
+        }
+
+        return toErase.empty() ? PreservedAnalyses::all() : PreservedAnalyses::none();
+    }
+};
+
 struct AlgebraicIdentityPass : public PassInfoMixin<AlgebraicIdentityPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         errs() << "Eseguo AlgebraicIdentityPass sulla funzione:  \n";
@@ -87,6 +149,15 @@ llvmGetPassPluginInfo() {
                    ArrayRef<PassBuilder::PipelineElement>) {
                     if (Name == "algebraic-identity") {
                         FPM.addPass(AlgebraicIdentityPass());
+                        return true;
+                    }
+                    if (Name == "strength-reduction") {
+                        FPM.addPass(StrengthReductionPass());
+                        return true;
+                    }
+                    if (Name == "all-opts") {
+                        FPM.addPass(AlgebraicIdentityPass());
+                        FPM.addPass(StrengthReductionPass());
                         return true;
                     }
                     return false;

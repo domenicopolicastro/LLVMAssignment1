@@ -7,3 +7,8 @@ int algebraic_identity_test(int x, int y) {
     
     return res4; // Alla fine, dovrebbe restituire 'x'
 }
+int strength_reduction_test(int x) {
+    int y = x * 15; // Pattern per la moltiplicazione
+    int z = y / 8;  // Pattern per la divisione
+    return z;
+}
