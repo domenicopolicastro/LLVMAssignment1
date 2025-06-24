@@ -1,25 +1,60 @@
 
-#include "llvm/IR/PassManager.h"      
-#include "llvm/IR/Function.h"          
-#include "llvm/IR/BasicBlock.h"        
-#include "llvm/Analysis/LoopInfo.h"    
-#include "llvm/Support/raw_ostream.h"  
+#include "llvm/IR/PassManager.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 
 using namespace llvm;
 
+
+void printDomTree(const DomTreeNode *Node, unsigned level) {
+    errs().indent(level * 2) << "[" << Node->getBlock()->getName() << "]\n";
+    
+    for (DomTreeNode *ChildNode : *Node) {
+        printDomTree(ChildNode, level + 1);
+    }
+}
+
+struct DominatorTreePass : public PassInfoMixin<DominatorTreePass> {
+    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+        errs() << "--- Dominator Tree per la funzione '" << F.getName() << "' ---\n";
+
+        DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
+
+        DomTreeNode *RootNode = DT.getRootNode();
+        if (!RootNode) {
+            errs() << "Nessun nodo radice trovato.\n";
+            return PreservedAnalyses::all();
+        }
+
+        printDomTree(RootNode, 0);
+
+        errs() << "\n--- Esempi di Relazioni di Dominanza ---\n";
+        BasicBlock *BlockA = &F.front();
+        BasicBlock *BlockG = &F.back();  
+
+        if (DT.dominates(BlockA, BlockG)) {
+            errs() << "Il blocco '" << BlockA->getName() << "' domina il blocco '" << BlockG->getName() << "' (Corretto!)\n";
+        }
+        
+        errs() << "\n";
+        return PreservedAnalyses::all();
+    }
+};
+
+
 struct LoopPass : public PassInfoMixin<LoopPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
-
         LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
-
         errs() << "Eseguo LoopPass sulla funzione: '" << F.getName() << "'\n";
 
         if (LI.empty()) {
             errs() << "  Nessun loop trovato in questa funzione.\n\n";
-            
             return PreservedAnalyses::all();
         }
 
@@ -60,18 +95,22 @@ struct LoopPass : public PassInfoMixin<LoopPass> {
     }
 };
 
-
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
     return {
-        LLVM_PLUGIN_API_VERSION, "LoopPassPlugin", "v0.1",
+        LLVM_PLUGIN_API_VERSION, "MyAnalysisPlugins", "v0.1",
         [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, FunctionPassManager &FPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
-
+                    
                     if (Name == "loop-pass") {
                         FPM.addPass(LoopPass());
+                        return true;
+                    }
+
+                    if (Name == "dominator-tree-pass") {
+                        FPM.addPass(DominatorTreePass());
                         return true;
                     }
 
