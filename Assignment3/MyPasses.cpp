@@ -22,6 +22,28 @@ void printDomTree(const DomTreeNode *Node, unsigned level) {
     }
 }
 
+bool isDeadOutsideLoop(Loop *L, Instruction *Inst) {
+    for (User *U : Inst->users()) {
+        Instruction *UseInst = cast<Instruction>(U);
+        if (!L->contains(UseInst)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool dominatesAllUsesInLoop(DominatorTree &DT, Loop *L, Instruction* Inst) {
+    for (User *U : Inst->users()) {
+        Instruction *UseInst = cast<Instruction>(U);
+        if (L->contains(UseInst)) {
+            if (!DT.dominates(Inst, UseInst)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 struct DominatorTreePass : public PassInfoMixin<DominatorTreePass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         errs() << "--- Dominator Tree per la funzione '" << F.getName() << "' ---\n";
@@ -81,7 +103,7 @@ struct LICMPass : public PassInfoMixin<LICMPass> {
                         }
                     }
 
-                    if (dominatesExits) {
+                    if ((dominatesExits || isDeadOutsideLoop(L, &I)) && dominatesAllUsesInLoop(DT, L, &I)) {
                         Candidates.push_back(&I);
                     }
                 }
@@ -137,7 +159,6 @@ llvmGetPassPluginInfo() {
                         FPM.addPass(DominatorTreePass());
                         return true;
                     }
-                    // Aggiunta la registrazione per il nuovo pass LICM
                     if (Name == "licm-pass") {
                         FPM.addPass(LICMPass());
                         return true;
