@@ -133,52 +133,39 @@ struct AlgebraicIdentityPass : public PassInfoMixin<AlgebraicIdentityPass> {
                     Value *lhs = op->getOperand(0);
                     Value *rhs = op->getOperand(1);
 
-                    if (op->getOpcode() == Instruction::Add) {
-                        
-                        ConstantInt *constOperand = nullptr;
-                        Value *otherOperand = nullptr;
-
+                    if (op->getOpcode() == Instruction::Add || op->getOpcode() == Instruction::Sub) {
                         if (auto *constRHS = dyn_cast<ConstantInt>(rhs)) {
                             if (constRHS->isZero()) {
-                                constOperand = constRHS;
-                                otherOperand = lhs;
+                                op->replaceAllUsesWith(lhs); 
+                                toErase.push_back(op);
                             }
                         }
-                        else if (auto *constLHS = dyn_cast<ConstantInt>(lhs)) {
-                            if (constLHS->isZero()) {
-                                constOperand = constLHS;
-                                otherOperand = rhs;
+                        else if (op->getOpcode() == Instruction::Add) {
+                            if (auto *constLHS = dyn_cast<ConstantInt>(lhs)) {
+                                if (constLHS->isZero()) {
+                                    op->replaceAllUsesWith(rhs); 
+                                    toErase.push_back(op);
+                                }
                             }
-                        }
-                        if (constOperand && otherOperand) {
-                            op->replaceAllUsesWith(otherOperand);
-                            toErase.push_back(op);
                         }
                     }
-
-                    else if (op->getOpcode() == Instruction::Mul) {
-                        
-                        ConstantInt *constOperand = nullptr;
-                        Value *otherOperand = nullptr;
-
+                    else if (op->getOpcode() == Instruction::Mul || op->getOpcode() == Instruction::SDiv || op->getOpcode() == Instruction::UDiv) {
                         if (auto *constRHS = dyn_cast<ConstantInt>(rhs)) {
                             if (constRHS->isOne()) {
-                                constOperand = constRHS;
-                                otherOperand = lhs;
+                                op->replaceAllUsesWith(lhs);
+                                toErase.push_back(op);
                             }
                         }
-                        else if (auto *constLHS = dyn_cast<ConstantInt>(lhs)) {
-                            if (constLHS->isOne()) {
-                                constOperand = constLHS;
-                                otherOperand = rhs;
+                        else if (op->getOpcode() == Instruction::Mul) {
+                            if (auto *constLHS = dyn_cast<ConstantInt>(lhs)) {
+                                if (constLHS->isOne()) {
+                                    op->replaceAllUsesWith(rhs);
+                                    toErase.push_back(op);
+                                }
                             }
-                        }
-                        
-                        if (constOperand && otherOperand) {
-                            op->replaceAllUsesWith(otherOperand);
-                            toErase.push_back(op);
                         }
                     }
+
                 }
             }
         }
