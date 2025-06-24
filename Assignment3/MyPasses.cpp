@@ -1,20 +1,22 @@
-
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils/LoopUtils.h"
+#include "llvm/Analysis/ValueTracking.h"
 
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 
-using namespace llvm;
+#include <vector>
+#include <algorithm>
 
+using namespace llvm;
 
 void printDomTree(const DomTreeNode *Node, unsigned level) {
     errs().indent(level * 2) << "[" << Node->getBlock()->getName() << "]\n";
-    
     for (DomTreeNode *ChildNode : *Node) {
         printDomTree(ChildNode, level + 1);
     }
@@ -23,82 +25,105 @@ void printDomTree(const DomTreeNode *Node, unsigned level) {
 struct DominatorTreePass : public PassInfoMixin<DominatorTreePass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         errs() << "--- Dominator Tree per la funzione '" << F.getName() << "' ---\n";
-
         DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
-
         DomTreeNode *RootNode = DT.getRootNode();
         if (!RootNode) {
             errs() << "Nessun nodo radice trovato.\n";
             return PreservedAnalyses::all();
         }
-
         printDomTree(RootNode, 0);
-
-        errs() << "\n--- Esempi di Relazioni di Dominanza ---\n";
-        BasicBlock *BlockA = &F.front();
-        BasicBlock *BlockG = &F.back();  
-
-        if (DT.dominates(BlockA, BlockG)) {
-            errs() << "Il blocco '" << BlockA->getName() << "' domina il blocco '" << BlockG->getName() << "' (Corretto!)\n";
-        }
-        
         errs() << "\n";
         return PreservedAnalyses::all();
     }
 };
 
-
 struct LoopPass : public PassInfoMixin<LoopPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
         errs() << "Eseguo LoopPass sulla funzione: '" << F.getName() << "'\n";
-
         if (LI.empty()) {
             errs() << "  Nessun loop trovato in questa funzione.\n\n";
             return PreservedAnalyses::all();
         }
-
-        errs() << "--- Controllo degli Header dei Loop ---\n";
-        for (auto &BB : F) {
-            if (LI.isLoopHeader(&BB)) {
-                errs() << "Il Basic Block '" << BB.getName() << "' è un header di loop.\n";
-            }
-        }
-
-        errs() << "\n--- Analisi Dettagliata dei Loop ---\n";
-        int loop_counter = 1;
         for (Loop *L : LI) {
-            errs() << "Loop #" << loop_counter++ << ":\n";
-
-            if (L->isLoopSimplifyForm()) {
-                errs() << "  - Il loop è in forma 'simplify'.\n";
-            } else {
-                errs() << "  - Il loop NON è in forma 'simplify'.\n";
-            }
-
-            BasicBlock *Header = L->getHeader();
-            Function *ParentFunc = Header->getParent(); 
-            errs() << "  - L'header è '" << Header->getName() << "'. La funzione genitore è '" << ParentFunc->getName() << "'.\n";
-
-            errs() << "  - Blocchi che compongono questo loop:\n";
-            for (BasicBlock *Block : L->getBlocks()) {
-                if (Block->hasName()) {
-                    errs() << "    -> " << Block->getName() << "\n";
-                } else {
-                    errs() << "    -> (blocco senza nome) " << Block << "\n";
-                }
-            }
-            errs() << "\n";
+            errs() << "Trovato loop con header '" << L->getHeader()->getName() << "'\n";
         }
-        
+        errs() << "\n";
         return PreservedAnalyses::all();
     }
 };
 
+struct LICMPass : public PassInfoMixin<LICMPass> {
+    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+        LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
+        DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
+        bool Transformed = false;
+
+        for (Loop *L : LI) {
+            BasicBlock *Preheader = L->getLoopPreheader();
+            if (!Preheader) continue;
+
+            std::vector<Instruction*> Candidates;
+            for (BasicBlock *BB : L->getBlocks()) {
+                for (Instruction &I : *BB) {
+                    bool isInvariant = L->isLoopInvariant(&I);
+                    bool isSafeToMove = isSafeToSpeculativelyExecute(&I) && !I.mayReadFromMemory() && !I.isTerminator();
+
+                    if (!isInvariant || !isSafeToMove) continue;
+
+                    bool dominatesExits = true;
+                    SmallVector<BasicBlock*, 8> ExitBlocks;
+                    L->getExitBlocks(ExitBlocks);
+                    for (BasicBlock *ExitBB : ExitBlocks) {
+                        if (!DT.dominates(I.getParent(), ExitBB)) {
+                            dominatesExits = false;
+                            break;
+                        }
+                    }
+
+                    if (dominatesExits) {
+                        Candidates.push_back(&I);
+                    }
+                }
+            }
+
+            bool movedInThisIteration;
+            do {
+                movedInThisIteration = false;
+                for (auto it = Candidates.begin(); it != Candidates.end(); ) {
+                    Instruction *InstToMove = *it;
+                    bool canMove = true;
+                    for (Value *Op : InstToMove->operands()) {
+                        if (auto *OpInst = dyn_cast<Instruction>(Op)) {
+                            if (L->contains(OpInst) && std::find(Candidates.begin(), Candidates.end(), OpInst) != Candidates.end()) {
+                                canMove = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (canMove) {
+                        InstToMove->moveBefore(Preheader->getTerminator());
+                        errs() << "LICM: Spostata istruzione '" << InstToMove->getOpcodeName() << "' nel preheader.\n";
+                        it = Candidates.erase(it);
+                        movedInThisIteration = true;
+                        Transformed = true;
+                    } else {
+                        ++it;
+                    }
+                }
+            } while (movedInThisIteration);
+        }
+
+        return Transformed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    }
+};
+
+
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
     return {
-        LLVM_PLUGIN_API_VERSION, "MyAnalysisPlugins", "v0.1",
+        LLVM_PLUGIN_API_VERSION, "MyLLVMAssignmentPlugins", "v0.1",
         [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, FunctionPassManager &FPM,
@@ -108,9 +133,13 @@ llvmGetPassPluginInfo() {
                         FPM.addPass(LoopPass());
                         return true;
                     }
-
                     if (Name == "dominator-tree-pass") {
                         FPM.addPass(DominatorTreePass());
+                        return true;
+                    }
+                    // Aggiunta la registrazione per il nuovo pass LICM
+                    if (Name == "licm-pass") {
+                        FPM.addPass(LICMPass());
                         return true;
                     }
 
