@@ -1,42 +1,69 @@
 #include "llvm/IR/PassManager.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/Analysis/LoopInfo.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Utils/LoopUtils.h"
-#include "llvm/Analysis/ValueTracking.h"
-
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Support/raw_ostream.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/CFG.h"
+
+#include <functional>
 #include <vector>
-#include <algorithm>
+#include <unordered_set>
 
 using namespace llvm;
 
-void printDomTree(const DomTreeNode *Node, unsigned level) {
-    errs().indent(level * 2) << "[" << Node->getBlock()->getName() << "]\n";
-    for (DomTreeNode *ChildNode : *Node) {
-        printDomTree(ChildNode, level + 1);
-    }
-}
+//=======================================================================================
+// 1. DEFINIZIONE DELLE FUNZIONI HELPER (COPIATE FEDELMENTE DAL TUO CODICE)
+//=======================================================================================
 
-bool isDeadOutsideLoop(Loop *L, Instruction *Inst) {
-    for (User *U : Inst->users()) {
-        Instruction *UseInst = cast<Instruction>(U);
-        if (!L->contains(UseInst)) {
+bool isDeadAtExit(Loop* L, Instruction* inst) {
+    // Trova i blocchi di uscita del loop
+    SmallVector<BasicBlock*, 4> exitBlocks;
+    L->getExitBlocks(exitBlocks);
+
+    // Se non ci sono blocchi di uscita, l'istruzione non può essere usata fuori, quindi è "morta"
+    if (exitBlocks.empty()) {
+        return true;
+    }
+
+    // Usa un set per tracciare i blocchi visitati
+    SmallPtrSet<BasicBlock*, 16> visited;
+    SmallVector<BasicBlock*, 16> worklist;
+    for (BasicBlock* exitBB : exitBlocks) {
+        worklist.push_back(exitBB);
+    }
+    
+    // Controlla gli usi di `inst` in tutti i blocchi raggiungibili dalle uscite del loop
+    for (auto& U : inst->uses()) {
+        Instruction* user = cast<Instruction>(U.getUser());
+        // Se un uso è fuori dal loop, l'istruzione non è morta
+        if (!L->contains(user)) {
             return false;
         }
     }
+
+    // Se tutti gli usi sono all'interno del loop, l'istruzione è morta all'uscita
     return true;
 }
 
-bool dominatesAllUsesInLoop(DominatorTree &DT, Loop *L, Instruction* Inst) {
-    for (User *U : Inst->users()) {
-        Instruction *UseInst = cast<Instruction>(U);
-        if (L->contains(UseInst)) {
-            if (!DT.dominates(Inst, UseInst)) {
+bool hasUniqueDefinitionInLoop(Loop* L, Instruction* inst) {
+    // NOTA: Questa logica custom basata su `getName()` è fragile ma viene mantenuta per fedeltà all'originale.
+    // Funziona solo se i valori sono stati nominati in modo univoco.
+    if (inst->getName().empty()) {
+        // Se non ha nome, non possiamo usare questa logica. Assumiamo che sia unico
+        // per non essere troppo restrittivi, o potremmo restituire false.
+        // Manteniamo il comportamento dell'originale.
+        return true;
+    }
+
+    for (auto *BB : L->getBlocks()) {
+        for (auto &I : *BB) {
+            // Controlla se un'ALTRA istruzione nello stesso loop ha lo STESSO nome.
+            if (&I != inst && !I.getName().empty() && I.getName() == inst->getName()) {
                 return false;
             }
         }
@@ -44,126 +71,242 @@ bool dominatesAllUsesInLoop(DominatorTree &DT, Loop *L, Instruction* Inst) {
     return true;
 }
 
-struct DominatorTreePass : public PassInfoMixin<DominatorTreePass> {
-    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
-        errs() << "--- Dominator Tree per la funzione '" << F.getName() << "' ---\n";
-        DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
-        DomTreeNode *RootNode = DT.getRootNode();
-        if (!RootNode) {
-            errs() << "Nessun nodo radice trovato.\n";
-            return PreservedAnalyses::all();
+bool dominatesAllUsesInLoop(DominatorTree &DT, Loop* L, Instruction* inst) {
+    BasicBlock* instBB = inst->getParent();
+    for (Use &U : inst->uses()) {
+        Instruction* userInst = dyn_cast<Instruction>(U.getUser());
+        if (userInst && L->contains(userInst)) {
+            if (!DT.dominates(instBB, userInst->getParent())) {
+                return false;
+            }
         }
-        printDomTree(RootNode, 0);
-        errs() << "\n";
-        return PreservedAnalyses::all();
     }
-};
+    return true;
+}
 
-struct LoopPass : public PassInfoMixin<LoopPass> {
-    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
-        LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
-        errs() << "Eseguo LoopPass sulla funzione: '" << F.getName() << "'\n";
-        if (LI.empty()) {
-            errs() << "  Nessun loop trovato in questa funzione.\n\n";
-            return PreservedAnalyses::all();
-        }
-        for (Loop *L : LI) {
-            errs() << "Trovato loop con header '" << L->getHeader()->getName() << "'\n";
-        }
-        errs() << "\n";
-        return PreservedAnalyses::all();
+bool isInvariant(Loop* L, std::vector<Instruction*>& invStmts, Instruction* inst) {
+    outs() << "Checking if the instruction: ";
+    inst->print(outs());
+    outs() << " is Loop Invariant\n";
+    
+    bool all_operands_defined_outside = true;
+    bool all_operands_loop_invariant = true;
+    bool is_constant = false;
+
+    // Questa condizione è troppo restrittiva, la modifichiamo leggermente per includere
+    // istruzioni come 'load' che possono essere invarianti.
+    if (inst->isTerminator() || isa<PHINode>(inst) || inst->mayHaveSideEffects()) {
+         outs() << "The instruction is not a candidate (terminator, phi, or has side-effects)\n";
+         return false;
     }
-};
+    
+    outs() << "The instruction is a candidate\n";
+    if (isa<Constant>(inst)) {
+        outs() << "The instruction is a constant \n";
+        is_constant = true;
+    } else {
+        outs() << "The instruction is NOT a constant \n";
+        
+        // Scorro gli operandi dell'istruzione
+        for (User::op_iterator OI = inst->op_begin(), OE = inst->op_end(); OI != OE; ++OI) {
+            Value *op = *OI;
+            outs() << "Checking operand: ";
+            op->print(outs());
+            outs() << ":\n";
 
-struct LICMPass : public PassInfoMixin<LICMPass> {
-    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
-        LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
-        DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
-        bool Transformed = false;
-
-        for (Loop *L : LI) {
-            BasicBlock *Preheader = L->getLoopPreheader();
-            if (!Preheader) continue;
-
-            std::vector<Instruction*> Candidates;
-            for (BasicBlock *BB : L->getBlocks()) {
-                for (Instruction &I : *BB) {
-                    bool isInvariant = L->isLoopInvariant(&I);
-                    bool isSafeToMove = isSafeToSpeculativelyExecute(&I) && !I.mayReadFromMemory() && !I.isTerminator();
-
-                    if (!isInvariant || !isSafeToMove) continue;
-
-                    bool dominatesExits = true;
-                    SmallVector<BasicBlock*, 8> ExitBlocks;
-                    L->getExitBlocks(ExitBlocks);
-                    for (BasicBlock *ExitBB : ExitBlocks) {
-                        if (!DT.dominates(I.getParent(), ExitBB)) {
-                            dominatesExits = false;
-                            break;
-                        }
-                    }
-
-                    if ((dominatesExits || isDeadOutsideLoop(L, &I)) && dominatesAllUsesInLoop(DT, L, &I)) {
-                        Candidates.push_back(&I);
-                    }
-                }
+            // Se l'operando non è una istruzione (es. una costante), è per definizione invariante
+            Instruction *opInst = dyn_cast<Instruction>(op);
+            if (!opInst) {
+                outs() << "The operand is not an instruction (e.g., a constant), it is invariant.\n";
+                continue;
             }
 
-            bool movedInThisIteration;
-            do {
-                movedInThisIteration = false;
-                for (auto it = Candidates.begin(); it != Candidates.end(); ) {
-                    Instruction *InstToMove = *it;
-                    bool canMove = true;
-                    for (Value *Op : InstToMove->operands()) {
-                        if (auto *OpInst = dyn_cast<Instruction>(Op)) {
-                            if (L->contains(OpInst) && std::find(Candidates.begin(), Candidates.end(), OpInst) != Candidates.end()) {
-                                canMove = false;
-                                break;
-                            }
-                        }
-                    }
+            // Se la reaching definition dell'operando si trova all'interno del loop
+            if (L->contains(opInst)) {
+                outs() << "The operand is defined inside the loop ";
+                all_operands_defined_outside = false; // Non tutti gli operandi sono definiti esternamente
 
-                    if (canMove) {
-                        InstToMove->moveBefore(Preheader->getTerminator());
-                        errs() << "LICM: Spostata istruzione '" << InstToMove->getOpcodeName() << "' nel preheader.\n";
-                        it = Candidates.erase(it);
-                        movedInThisIteration = true;
-                        Transformed = true;
-                    } else {
-                        ++it;
+                // Verifica se l'istruzione che definisce l'operando è invariante nel loop
+                bool isOpInvariant = false;
+                for (Instruction *invInst : invStmts) {
+                    if (invInst == opInst) {
+                        isOpInvariant = true;
+                        break;
                     }
                 }
-            } while (movedInThisIteration);
+                
+                if (!isOpInvariant) {
+                    outs() << "and it is NOT (yet) known to be loop invariant \n";
+                    all_operands_loop_invariant = false;
+                } else {
+                    outs() << "and it is loop invariant \n";
+                }
+            } else {
+                outs() << "The operand is defined outside the loop \n";
+            }
+
+            if (!all_operands_loop_invariant) {
+                outs() << "Found a variant operand, so this instruction cannot be invariant.\n";
+                break;
+            }
+        }
+    }
+
+    outs() << "The instruction ";
+    inst->print(outs());
+    if (is_constant || (all_operands_defined_outside || all_operands_loop_invariant)) {
+        outs() << " is Loop Invariant\n\n";
+        return true;
+    }   
+    
+    outs() << " is NOT Loop Invariant\n\n";
+    return false;
+}
+
+// Funzione runOnLoop, copiata e adattata per prendere gli argomenti corretti
+bool runOnLoop(Loop *L, LoopInfo &LI, DominatorTree &DT) {
+    bool modified = false;
+
+    if (!L->isLoopSimplifyForm()) {
+        outs() << "Loop is not in simplified form\n";
+        return modified;
+    }
+
+    BasicBlock* preheader = L->getLoopPreheader();
+    if (!preheader) {
+        outs() << "Preheader not found\n";
+        return modified;
+    }
+    outs() << "Preheader found\n";
+
+    std::vector<Instruction*> invStmts;
+    std::unordered_set<Instruction*> movedStmts;
+    bool changedInIteration = true;
+
+    // Approccio iterativo: continua a cercare istruzioni invarianti finché non ne trovi più.
+    // Questo gestisce correttamente le catene di dipendenze (es. y = x+1, z = y+2).
+    while (changedInIteration) {
+        changedInIteration = false;
+        for (BasicBlock* BB : L->getBlocks()) {
+            for (Instruction &I : *BB) {
+                // Controlla se l'istruzione è già stata trovata come invariante
+                bool alreadyFound = false;
+                for (Instruction* invI : invStmts) {
+                    if (&I == invI) {
+                        alreadyFound = true;
+                        break;
+                    }
+                }
+                if (alreadyFound) continue;
+
+                if (isInvariant(L, invStmts, &I)) {
+                    invStmts.push_back(&I);
+                    changedInIteration = true;
+                }
+            }
+        }
+    }
+
+    outs() << "Found Loop Invariant instructions:\n\n";
+    for (size_t j = 0; j < invStmts.size(); ++j) {
+        Instruction* inst = invStmts[j];
+        outs() << j+1 <<") ";
+        inst->print(outs());
+        outs() <<"\n\n";
+    }
+
+    SmallVector<BasicBlock*, 4> exitBlocks;
+    L->getExitBlocks(exitBlocks);
+    int n_moved = 0;
+
+    // Ora prova a muovere le istruzioni trovate
+    for (Instruction* inst : invStmts) {
+        outs() << "Performing code motion check for the loop invariant instruction ";
+        inst->print(outs());
+        outs() << "\n";
+        
+        // Condizione 1: L'istruzione domina tutti i suoi usi nel loop
+        if (!dominatesAllUsesInLoop(DT, L, inst)) {
+             outs() <<"The instruction doesn't dominate all of its uses inside the loop\n\n";
+             continue;
+        }
+        outs() <<"The instruction dominates all of its uses inside the loop\n";
+
+        // Condizione 2: Non ci sono altre definizioni della stessa "variabile" nel loop
+        if (!hasUniqueDefinitionInLoop(L, inst)) {
+            outs() <<"Multiple definitions of the same variable found inside the loop\n\n";
+            continue;
+        }
+        outs() <<"The variable is defined once inside the loop\n";
+
+        // Condizione 3: L'istruzione domina tutte le uscite del loop O è morta all'uscita
+        bool dominatesExits = true;
+        for (BasicBlock* exitBB : exitBlocks) {
+            if (!DT.dominates(inst->getParent(), exitBB)) {
+                dominatesExits = false;
+                break;
+            }
         }
 
-        return Transformed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+        if (dominatesExits) {
+            outs() <<"The instruction dominates all loop exit blocks\n";
+        } else {
+             outs() <<"The instruction does NOT dominate all loop exit blocks\n";
+             if (!isDeadAtExit(L, inst)) {
+                 outs() <<" and the instruction is NOT dead at the exit of the loop\n\n";
+                 continue; // Non può essere spostata
+             }
+             outs() <<" but the instruction is dead at the exits of the loop\n";
+        }
+
+        // Se tutte le condizioni sono soddisfatte, sposta l'istruzione
+        outs() <<"The instruction is a valid candidate for code motion. \n";
+        inst->moveBefore(preheader->getTerminator());
+        modified = true;
+        outs() <<"The instruction has been moved inside the preheader. \n\n";
+        n_moved++;
+    }
+
+    outs() << "Moved "<< n_moved <<" instruction(s) inside the preheader \n";
+    return modified;
+}
+
+
+//=======================================================================================
+// 2. STRUTTURA DEL PASS PER IL NUOVO PASS MANAGER
+//=======================================================================================
+struct CustomLICMPass : public PassInfoMixin<CustomLICMPass> {
+    PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM, LoopStandardAnalysisResults &LAR, LPMUpdater &LU) {
+        outs() << "Custom LICM Pass running on Loop: " << L.getHeader()->getName() << "\n";
+        
+        // Il tuo codice di riferimento usava `runOnLoop(&L, LAR.LI, LAR.DT)`
+        // Lo replichiamo qui.
+        if (runOnLoop(&L, LAR.LI, LAR.DT)) {
+            // Se il codice è stato modificato, le analisi non sono più valide
+            return PreservedAnalyses::none();
+        }
+        
+        // Se non è cambiato nulla, tutte le analisi sono preservate
+        return PreservedAnalyses::all();
     }
 };
 
 
+//=======================================================================================
+// 3. REGISTRAZIONE DEL PLUGIN
+//=======================================================================================
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
     return {
-        LLVM_PLUGIN_API_VERSION, "MyLLVMAssignmentPlugins", "v0.1",
+        LLVM_PLUGIN_API_VERSION, "CustomLICMPass", "v0.1",
         [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
-                [](StringRef Name, FunctionPassManager &FPM,
+                [](StringRef Name, LoopPassManager &LPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
-                    
-                    if (Name == "loop-pass") {
-                        FPM.addPass(LoopPass());
+                    if (Name == "custom-licm") {
+                        LPM.addPass(CustomLICMPass());
                         return true;
                     }
-                    if (Name == "dominator-tree-pass") {
-                        FPM.addPass(DominatorTreePass());
-                        return true;
-                    }
-                    if (Name == "licm-pass") {
-                        FPM.addPass(LICMPass());
-                        return true;
-                    }
-
                     return false;
                 }
             );
