@@ -6,3 +6,5 @@ clang-18 -S -O0 -emit-llvm -Xclang -disable-O0-optnone test/test_licm_advanced.c
 
 opt-18 -load-pass-plugin=./build/libMyLLVMPasses.so -passes="mem2reg,loop-simplify,licm-pass" -S ./test_licm_advanced.ll
 
+# Esegui il tuo pass LICM su un file di input (Build)
+opt-18 -load-pass-plugin=./libMyLLVMPasses.so -passes='custom-licm' -S ../test_licm_advanced.ll -o output.ll
