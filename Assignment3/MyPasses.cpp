@@ -16,47 +16,48 @@
 
 using namespace llvm;
 
-//=======================================================================================
-// 1. DEFINIZIONE DELLE FUNZIONI HELPER (COPIATE FEDELMENTE DAL TUO CODICE)
-//=======================================================================================
+//Caso speciale:
+//Ignora la condizione DOMINA TUTTI I BLOCCHI DEL LOOP
+//SE E SOLO SE NON VIENE USATA ALL'USCITA
 
 bool isDeadAtExit(Loop* L, Instruction* inst) {
     // Trova i blocchi di uscita del loop
     SmallVector<BasicBlock*, 4> exitBlocks;
     L->getExitBlocks(exitBlocks);
 
-    // Se non ci sono blocchi di uscita, l'istruzione non può essere usata fuori, quindi è "morta"
-    if (exitBlocks.empty()) {
-        return true;
-    }
-
     // Usa un set per tracciare i blocchi visitati
     SmallPtrSet<BasicBlock*, 16> visited;
-    SmallVector<BasicBlock*, 16> worklist;
-    for (BasicBlock* exitBB : exitBlocks) {
-        worklist.push_back(exitBB);
-    }
-    
-    // Controlla gli usi di `inst` in tutti i blocchi raggiungibili dalle uscite del loop
-    for (auto& U : inst->uses()) {
-        Instruction* user = cast<Instruction>(U.getUser());
-        // Se un uso è fuori dal loop, l'istruzione non è morta
-        if (!L->contains(user)) {
-            return false;
+    SmallVector<BasicBlock*, 16> worklist(exitBlocks.begin(), exitBlocks.end());
+
+    // Effettua una ricerca in ampiezza (BFS) a partire dai blocchi di uscita
+    while (!worklist.empty()) {
+        BasicBlock *BB = worklist.pop_back_val();
+        if (!visited.insert(BB).second)
+            continue; // Già visitato
+
+        for (Instruction &I : *BB) {
+            for (Use &U : I.operands()) {
+                if (U.get() == inst) {
+                    return false; // Trovato uso di inst fuori dal loop
+                }
+            }
+        }
+
+        // Aggiungi i successori alla worklist
+        for (BasicBlock *Succ : successors(BB)) {
+            worklist.push_back(Succ);
         }
     }
 
-    // Se tutti gli usi sono all'interno del loop, l'istruzione è morta all'uscita
     return true;
 }
 
 bool hasUniqueDefinitionInLoop(Loop* L, Instruction* inst) {
-    // NOTA: Questa logica custom basata su `getName()` è fragile ma viene mantenuta per fedeltà all'originale.
-    // Funziona solo se i valori sono stati nominati in modo univoco.
+    // NOTA: Questa logica basata su `getName()` è fragile 
+    // Mantenuta solo a livello didattico, con mem2reg -> SSA assicurata, è ridondante
     if (inst->getName().empty()) {
         // Se non ha nome, non possiamo usare questa logica. Assumiamo che sia unico
         // per non essere troppo restrittivi, o potremmo restituire false.
-        // Manteniamo il comportamento dell'originale.
         return true;
     }
 
@@ -72,10 +73,15 @@ bool hasUniqueDefinitionInLoop(Loop* L, Instruction* inst) {
 }
 
 bool dominatesAllUsesInLoop(DominatorTree &DT, Loop* L, Instruction* inst) {
+    //Prendo il blocco della mia istruzione candidata (loop semplice unico blocco?)
     BasicBlock* instBB = inst->getParent();
+    //Scorri tutti i punti dove la mia istruzione è usata come RHS
     for (Use &U : inst->uses()) {
+        //L'utilizzatore è una istruzione? Scrive su un registro?
         Instruction* userInst = dyn_cast<Instruction>(U.getUser());
+        //Questa istruzione che usa la mia candidata è nel loop stesso?
         if (userInst && L->contains(userInst)) {
+            //La definizione domina l'uso?
             if (!DT.dominates(instBB, userInst->getParent())) {
                 return false;
             }
@@ -163,7 +169,7 @@ bool isInvariant(Loop* L, std::vector<Instruction*>& invStmts, Instruction* inst
     return false;
 }
 
-// Funzione runOnLoop, copiata e adattata per prendere gli argomenti corretti
+
 bool runOnLoop(Loop *L, LoopInfo &LI, DominatorTree &DT) {
     bool modified = false;
 
@@ -233,6 +239,7 @@ bool runOnLoop(Loop *L, LoopInfo &LI, DominatorTree &DT) {
         outs() <<"The instruction dominates all of its uses inside the loop\n";
 
         // Condizione 2: Non ci sono altre definizioni della stessa "variabile" nel loop
+        // Caso Didattico, non serve in SSA
         if (!hasUniqueDefinitionInLoop(L, inst)) {
             outs() <<"Multiple definitions of the same variable found inside the loop\n\n";
             continue;
@@ -272,29 +279,19 @@ bool runOnLoop(Loop *L, LoopInfo &LI, DominatorTree &DT) {
 }
 
 
-//=======================================================================================
-// 2. STRUTTURA DEL PASS PER IL NUOVO PASS MANAGER
-//=======================================================================================
 struct CustomLICMPass : public PassInfoMixin<CustomLICMPass> {
     PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM, LoopStandardAnalysisResults &LAR, LPMUpdater &LU) {
         outs() << "Custom LICM Pass running on Loop: " << L.getHeader()->getName() << "\n";
         
-        // Il tuo codice di riferimento usava `runOnLoop(&L, LAR.LI, LAR.DT)`
-        // Lo replichiamo qui.
         if (runOnLoop(&L, LAR.LI, LAR.DT)) {
-            // Se il codice è stato modificato, le analisi non sono più valide
             return PreservedAnalyses::none();
         }
         
-        // Se non è cambiato nulla, tutte le analisi sono preservate
         return PreservedAnalyses::all();
     }
 };
 
 
-//=======================================================================================
-// 3. REGISTRAZIONE DEL PLUGIN
-//=======================================================================================
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
     return {
