@@ -9,9 +9,8 @@ volatile int condition_b = 0;
 // DEVE essere spostata.
 int test_case_1_simple_invariant(int a, int b, int n) {
     int result = 0;
-    int inv = a * b; // Invariante
-
     for (int i = 0; i < n; i++) {
+        int inv = a * b; // Invariante
         result += inv;
     }
     return result;
