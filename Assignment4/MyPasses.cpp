@@ -46,14 +46,6 @@ void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, Lo
         return;
     }
 
-    //link L1's parent exit to L2's parent exit
-    if (!L1->isOutermost() && !L2->isOutermost()) {
-        Loop *L1Parent = L1->getOutermostLoop();
-        Loop *L2Parent = L2->getOutermostLoop();
-        if (L1Parent && L2Parent) {
-            L1Parent->getHeader()->getTerminator()->replaceUsesOfWith(L1Parent->getExitBlock(), L2Parent->getExitBlock());
-        }
-    }
 
     //replace the uses of L2's induction variable with the uses of L1's
     index2->replaceAllUsesWith(index1);
@@ -419,7 +411,7 @@ bool tryFuseLoops(fusionCandidate *C1, fusionCandidate *C2, ScalarEvolution &SE,
     Loop *L1 = C1->loop;
     Loop *L2 = C2->loop;
 
-    if (!areLoopsAdjacent(L1->getOutermostLoop(), L2->getOutermostLoop())) {
+    if (!areLoopsAdjacent(L1, L2)) {
         outs() << "Loops are not adjacent \n";
         return false;
     }
@@ -455,7 +447,7 @@ bool tryFuseLoops(fusionCandidate *C1, fusionCandidate *C2, ScalarEvolution &SE,
 
     outs() << "Loops have the same trip count \n";
 
-    if (!controlFlowEquivalent(L1->getOutermostLoop(), L2->getOutermostLoop(), DT, PDT)) {
+    if (!controlFlowEquivalent(L1, L2, DT, PDT)) {
         outs() << "Loops are not control flow equivalent \n";
         return false;
     }
