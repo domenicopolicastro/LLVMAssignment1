@@ -67,6 +67,7 @@ void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, Lo
     BasicBlock *L1_body_end = L1_latch->getUniquePredecessor();
     BasicBlock *L2_body_end = L2_latch->getUniquePredecessor();
     BasicBlock *L2_body_start = nullptr;
+
     for (auto sit1 = succ_begin(L2_header); sit1 != succ_end(L2_header); sit1++) {
         BasicBlock *header_successor = dyn_cast<BasicBlock>(*sit1);
         if (L2->contains(header_successor)) {
@@ -74,7 +75,7 @@ void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, Lo
             break;
         }
     }
-    //link L1's header to L2's exit
+    
     for (BasicBlock *BB : L2_exit_blocks) {
         for (pred_iterator pit = pred_begin(BB); pit != pred_end(BB); pit++) {
             BasicBlock *predecessor = dyn_cast<BasicBlock>(*pit);
