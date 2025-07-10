@@ -17,6 +17,7 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h" 
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/IR/Value.h"
 
 using namespace llvm;
 
@@ -28,6 +29,22 @@ struct fusionCandidate {
     const SCEV *tripCount;
     Loop *loop;
 };
+
+BranchInst* findGuard(Loop *L) {
+    BasicBlock *preheader = L->getLoopPreheader();
+    if (!preheader) return nullptr;
+
+    BasicBlock *guardCandidateBlock = preheader->getUniquePredecessor();
+    if (!guardCandidateBlock) return nullptr;
+    
+    if (auto *guardBranch = dyn_cast<BranchInst>(guardCandidateBlock->getTerminator())) {
+        if (guardBranch->isConditional()) {
+            return guardBranch; 
+        }
+    }
+
+    return nullptr;
+}
 
 void updateAnalysisInfo(Function &F, DominatorTree &DT, PostDominatorTree &PDT) {
     // Ricalcolare il Dominator Tree e il Post Dominator Tree
@@ -139,16 +156,24 @@ bool areLoopsAdjacent(Loop *L1, Loop *L2) {
         return false;
     }
 
-    if (L1->isGuarded() && L2->isGuarded()) {
-        BranchInst *L1Guard = L1->getLoopGuardBranch();
-        outs() << "L1 and L2 are guarded loops \n";
-        for (unsigned i = 0; i < L1Guard->getNumSuccessors(); ++i) {
-            if (!L1->contains(L1Guard->getSuccessor(i)) && L1Guard->getSuccessor(i) == L2->getHeader()) {
-                outs() << "The non-loop successor of the guard branch of L1 corresponds to L2's entry block \n";
-                return true;
-            }
+    BranchInst *L1Guard = findGuard(L1);
+    BranchInst *L2Guard = findGuard(L2);
+
+
+    if (L1Guard && L2Guard) {
+        outs() << "L1 and L2 are guarded loops (didactic check)\n";
+
+        BasicBlock *L1GuardBlock = L1Guard->getParent();
+        BasicBlock *L2GuardBlock = L2Guard->getParent();
+        BasicBlock *L1Preheader = L1->getLoopPreheader();
+        BasicBlock *FallthroughBlock = (L1Guard->getSuccessor(0) == L1Preheader) ? L1Guard->getSuccessor(1) : L1Guard->getSuccessor(0);
+
+        if (FallthroughBlock == L2GuardBlock) {
+             outs() << "Guarded loops are adjacent.\n";
+             return true;
         }
-    } else if (!L1->isGuarded() && !L2->isGuarded()) {
+        
+    } else if (!L1Guard && !L2Guard) {
         outs() << "L1 and L2 are unguarded loops \n";
         BasicBlock *L1ExitingBlock = L1->getExitBlock();
         BasicBlock *L2Preheader = L2->getLoopPreheader();
@@ -204,10 +229,43 @@ bool areLoopsAdjacent(Loop *L1, Loop *L2) {
 }
 
 bool controlFlowEquivalent(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT) {
-    return (DT.dominates(L1->getHeader(), L2->getHeader()) && PDT.dominates(L2->getHeader(), L1->getHeader()));
+    
+    BranchInst *L1Guard = findGuard(L1);
+    BranchInst *L2Guard = findGuard(L2);
+
+    if (L1Guard && L2Guard) {
+        outs() << "Checking control flow equivalence for GUARDED loops.\n";
+        
+        Value *Cond1_Value = L1Guard->getCondition();
+        Value *Cond2_Value = L2Guard->getCondition();
+
+        // 1. Facciamo il cast da Value* a Instruction*
+        auto *Cond1_Inst = dyn_cast<Instruction>(Cond1_Value);
+        auto *Cond2_Inst = dyn_cast<Instruction>(Cond2_Value);
+
+        // 2. Controlliamo che il cast sia riuscito per entrambi
+        //    e POI chiamiamo isIdenticalTo().
+        if (Cond1_Inst && Cond2_Inst && Cond1_Inst->isIdenticalTo(Cond2_Inst)) {
+            outs() << "Guard conditions are semantically equivalent.\n";
+            return true;
+        } else {
+            outs() << "Guard conditions are NOT semantically equivalent.\n";
+            return false; // Li consideriamo non equivalenti se le guardie sono diverse
+        }
+    }
+    
+    else if (!L1Guard && !L2Guard) {
+        outs() << "Checking control flow equivalence for UNGUARDED loops.\n";
+        return (DT.dominates(L1->getHeader(), L2->getHeader()) && 
+                PDT.dominates(L2->getHeader(), L1->getHeader()));
+    }
+    
+    else {
+        outs() << "Mixed loop types (guarded/unguarded), not equivalent.\n";
+        return false;
+    }
 }
 
-//returns a polynomial recurrence on the trip count of a load/store instruction
 const SCEVAddRecExpr *getSCEVAddRec(Instruction *I, Loop *L, ScalarEvolution &SE) {
     SmallPtrSet<const SCEVPredicate *, 4> preds;
     //SCEV representation of the pointer operand of the load/store instruction inside the scope of the loop
@@ -385,7 +443,11 @@ bool dependencesAllowFusion(Loop *L0, Loop *L1, DominatorTree &DT, ScalarEvoluti
             }
         }
     }
-
+    /*
+        Caso a[i] = qualcosa NEL LOOP 1
+        print a[i+1] nel LOOP 2
+        a i+1 non è pronto alla stessa iterazione di a[i]
+    */
     //check for any negative distance dependency between the store instructions of L0 and the load instructions of L1
     for (Instruction *WriteL0 : L0MemWrites) {
         for (Instruction *ReadL1 : L1MemReads) {
@@ -394,7 +456,11 @@ bool dependencesAllowFusion(Loop *L0, Loop *L1, DominatorTree &DT, ScalarEvoluti
             }
         }
     }
-
+    /*
+        Caso print a[i-1] in LOOP 1
+        a[i] = Valore in LOOP 2
+        a[i] verrebbe sovrascritto nel momento sbagliato
+    */
     //check for any negative distance dependency between the store instructions of L1 and the load instructions of L0
     for (Instruction *WriteL1 : L1MemWrites) {
         for (Instruction *ReadL0 : L0MemReads) {
