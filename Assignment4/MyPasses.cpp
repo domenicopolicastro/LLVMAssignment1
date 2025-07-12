@@ -30,19 +30,22 @@ struct fusionCandidate {
     Loop *loop;
 };
 
-BranchInst* findGuard(Loop *L) {
+BranchInst* findGuard(Loop *L, LoopInfo &LI) {
     BasicBlock *preheader = L->getLoopPreheader();
     if (!preheader) return nullptr;
 
     BasicBlock *guardCandidateBlock = preheader->getUniquePredecessor();
     if (!guardCandidateBlock) return nullptr;
     
+    if (LI.getLoopFor(guardCandidateBlock) != nullptr) {
+        return nullptr;
+    }
+    
     if (auto *guardBranch = dyn_cast<BranchInst>(guardCandidateBlock->getTerminator())) {
         if (guardBranch->isConditional()) {
             return guardBranch; 
         }
     }
-
     return nullptr;
 }
 
@@ -51,6 +54,57 @@ void updateAnalysisInfo(Function &F, DominatorTree &DT, PostDominatorTree &PDT) 
     DT.recalculate(F);
     PDT.recalculate(F);
 }
+/*
+void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI, Function &F, DependenceInfo &DI, ScalarEvolution &SE, FunctionAnalysisManager &AM) {
+    outs() << ">> Fusing L1 (Header: " << L1->getHeader()->getName() << ") into L2 (Header: " << L2->getHeader()->getName() << ")\n";
+
+    // --- PASSO 1: Unifica le variabili di induzione ---
+    PHINode *index1 = L1->getCanonicalInductionVariable();
+    PHINode *index2 = L2->getCanonicalInductionVariable();
+    if (!index1 || !index2) {
+        outs() << "Error: Induction variables not found.\n";
+        return;
+    }
+    index2->replaceAllUsesWith(index1);
+    index2->eraseFromParent();
+    outs() << "  [1/4] Induction variables unified.\n";
+
+    // --- PASSO 2: Ricuci il flusso di controllo ---
+    BasicBlock *L1_header = L1->getHeader();
+    BasicBlock *L1_latch = L1->getLoopLatch();
+    BasicBlock *L1_body_end = L1_latch->getUniquePredecessor(); // Blocco prima del latch
+    
+    BasicBlock *L2_header = L2->getHeader();
+    BasicBlock *L2_latch = L2->getLoopLatch();
+    BasicBlock *L2_body_start = L2->getHeader()->getSingleSuccessor(); // In un loop canonico, l'header porta al corpo
+    BasicBlock *L2_body_end = L2_latch->getUniquePredecessor();
+
+    // 2a: Collega la fine del corpo di L1 all'inizio del corpo di L2
+    L1_body_end->getTerminator()->setSuccessor(0, L2_body_start);
+    
+    // 2b: Collega la fine del corpo di L2 al latch di L1
+    L2_body_end->getTerminator()->setSuccessor(0, L1_latch);
+    outs() << "  [2/4] Loop bodies stitched together.\n";
+
+    // --- PASSO 3: Correggi l'uscita del loop ---
+    BasicBlock *L1_exit = L1->getExitBlock();
+    BasicBlock *L2_exit = L2->getExitBlock();
+    if (L1_exit && L2_exit) {
+        L1_header->getTerminator()->replaceUsesOfWith(L1_exit, L2_exit);
+        outs() << "  [3/4] Loop exit path redirected.\n";
+    } else {
+        outs() << "  [WARNING] Could not find unique exit blocks to redirect.\n";
+    }
+
+    // --- PASSO 4: Pulisci la vecchia struttura di L2 ---
+    // Rendi il vecchio header di L2 irraggiungibile facendolo saltare a se stesso.
+    L2_header->getTerminator()->setSuccessor(0, L2_header);
+    
+    EliminateUnreachableBlocks(F);
+    updateAnalysisInfo(F, DT, PDT);
+    outs() << "  [4/4] Cleanup complete.\n";
+}
+*/
 
 void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI, Function &F, DependenceInfo &DI, ScalarEvolution &SE, FunctionAnalysisManager &AM) {
     //Replace the uses of the induction variable of the second loop with the induction variable of the first loop.
@@ -62,7 +116,6 @@ void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, Lo
         outs() << "Induction variables not found\n";
         return;
     }
-
 
     //replace the uses of L2's induction variable with the uses of L1's
     index2->replaceAllUsesWith(index1);
@@ -150,15 +203,15 @@ void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, Lo
     outs() << "Deleted unreachable blocks\n";
 }
 
-bool areLoopsAdjacent(Loop *L1, Loop *L2) {
+bool areLoopsAdjacent(Loop *L1, Loop *L2, LoopInfo &LI) {
     if (!L1 || !L2) {
         outs() << "Either L1 or L2 is a NULL pointer \n";
         return false;
     }
 
-    BranchInst *L1Guard = findGuard(L1);
-    BranchInst *L2Guard = findGuard(L2);
-
+    BranchInst *L1Guard = findGuard(L1, LI);
+    BranchInst *L2Guard = findGuard(L2, LI);
+    
 
     if (L1Guard && L2Guard) {
         outs() << "L1 and L2 are guarded loops (didactic check)\n";
@@ -228,10 +281,10 @@ bool areLoopsAdjacent(Loop *L1, Loop *L2) {
     return false;
 }
 
-bool controlFlowEquivalent(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT) {
+bool controlFlowEquivalent(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI) {
     
-    BranchInst *L1Guard = findGuard(L1);
-    BranchInst *L2Guard = findGuard(L2);
+    BranchInst *L1Guard = findGuard(L1, LI);
+    BranchInst *L2Guard = findGuard(L2, LI);
 
     if (L1Guard && L2Guard) {
         outs() << "Checking control flow equivalence for GUARDED loops.\n";
@@ -239,18 +292,15 @@ bool controlFlowEquivalent(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorT
         Value *Cond1_Value = L1Guard->getCondition();
         Value *Cond2_Value = L2Guard->getCondition();
 
-        // 1. Facciamo il cast da Value* a Instruction*
         auto *Cond1_Inst = dyn_cast<Instruction>(Cond1_Value);
         auto *Cond2_Inst = dyn_cast<Instruction>(Cond2_Value);
 
-        // 2. Controlliamo che il cast sia riuscito per entrambi
-        //    e POI chiamiamo isIdenticalTo().
         if (Cond1_Inst && Cond2_Inst && Cond1_Inst->isIdenticalTo(Cond2_Inst)) {
             outs() << "Guard conditions are semantically equivalent.\n";
             return true;
         } else {
             outs() << "Guard conditions are NOT semantically equivalent.\n";
-            return false; // Li consideriamo non equivalenti se le guardie sono diverse
+            return false;
         }
     }
     
@@ -478,7 +528,7 @@ bool tryFuseLoops(fusionCandidate *C1, fusionCandidate *C2, ScalarEvolution &SE,
     Loop *L1 = C1->loop;
     Loop *L2 = C2->loop;
 
-    if (!areLoopsAdjacent(L1, L2)) {
+    if (!areLoopsAdjacent(L1, L2, LI)) {
         outs() << "Loops are not adjacent \n";
         return false;
     }
@@ -514,7 +564,7 @@ bool tryFuseLoops(fusionCandidate *C1, fusionCandidate *C2, ScalarEvolution &SE,
 
     outs() << "Loops have the same trip count \n";
 
-    if (!controlFlowEquivalent(L1, L2, DT, PDT)) {
+    if (!controlFlowEquivalent(L1, L2, DT, PDT, LI)) {
         outs() << "Loops are not control flow equivalent \n";
         return false;
     }
