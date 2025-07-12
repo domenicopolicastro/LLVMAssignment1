@@ -54,57 +54,7 @@ void updateAnalysisInfo(Function &F, DominatorTree &DT, PostDominatorTree &PDT) 
     DT.recalculate(F);
     PDT.recalculate(F);
 }
-/*
-void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI, Function &F, DependenceInfo &DI, ScalarEvolution &SE, FunctionAnalysisManager &AM) {
-    outs() << ">> Fusing L1 (Header: " << L1->getHeader()->getName() << ") into L2 (Header: " << L2->getHeader()->getName() << ")\n";
 
-    // --- PASSO 1: Unifica le variabili di induzione ---
-    PHINode *index1 = L1->getCanonicalInductionVariable();
-    PHINode *index2 = L2->getCanonicalInductionVariable();
-    if (!index1 || !index2) {
-        outs() << "Error: Induction variables not found.\n";
-        return;
-    }
-    index2->replaceAllUsesWith(index1);
-    index2->eraseFromParent();
-    outs() << "  [1/4] Induction variables unified.\n";
-
-    // --- PASSO 2: Ricuci il flusso di controllo ---
-    BasicBlock *L1_header = L1->getHeader();
-    BasicBlock *L1_latch = L1->getLoopLatch();
-    BasicBlock *L1_body_end = L1_latch->getUniquePredecessor(); // Blocco prima del latch
-    
-    BasicBlock *L2_header = L2->getHeader();
-    BasicBlock *L2_latch = L2->getLoopLatch();
-    BasicBlock *L2_body_start = L2->getHeader()->getSingleSuccessor(); // In un loop canonico, l'header porta al corpo
-    BasicBlock *L2_body_end = L2_latch->getUniquePredecessor();
-
-    // 2a: Collega la fine del corpo di L1 all'inizio del corpo di L2
-    L1_body_end->getTerminator()->setSuccessor(0, L2_body_start);
-    
-    // 2b: Collega la fine del corpo di L2 al latch di L1
-    L2_body_end->getTerminator()->setSuccessor(0, L1_latch);
-    outs() << "  [2/4] Loop bodies stitched together.\n";
-
-    // --- PASSO 3: Correggi l'uscita del loop ---
-    BasicBlock *L1_exit = L1->getExitBlock();
-    BasicBlock *L2_exit = L2->getExitBlock();
-    if (L1_exit && L2_exit) {
-        L1_header->getTerminator()->replaceUsesOfWith(L1_exit, L2_exit);
-        outs() << "  [3/4] Loop exit path redirected.\n";
-    } else {
-        outs() << "  [WARNING] Could not find unique exit blocks to redirect.\n";
-    }
-
-    // --- PASSO 4: Pulisci la vecchia struttura di L2 ---
-    // Rendi il vecchio header di L2 irraggiungibile facendolo saltare a se stesso.
-    L2_header->getTerminator()->setSuccessor(0, L2_header);
-    
-    EliminateUnreachableBlocks(F);
-    updateAnalysisInfo(F, DT, PDT);
-    outs() << "  [4/4] Cleanup complete.\n";
-}
-*/
 
 void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI, Function &F, DependenceInfo &DI, ScalarEvolution &SE, FunctionAnalysisManager &AM) {
     //Replace the uses of the induction variable of the second loop with the induction variable of the first loop.
@@ -202,6 +152,7 @@ void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, Lo
 
     outs() << "Deleted unreachable blocks\n";
 }
+
 
 bool areLoopsAdjacent(Loop *L1, Loop *L2, LoopInfo &LI) {
     if (!L1 || !L2) {
