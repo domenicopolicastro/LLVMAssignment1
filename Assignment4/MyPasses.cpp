@@ -21,10 +21,6 @@
 
 using namespace llvm;
 
-//=======================================================================================
-// 1. DEFINIZIONE DELLE STRUTTURE E FUNZIONI HELPER (COPIATE DAL TUO CODICE)
-//=======================================================================================
-
 struct fusionCandidate {
     const SCEV *tripCount;
     Loop *loop;
@@ -55,35 +51,52 @@ void updateAnalysisInfo(Function &F, DominatorTree &DT, PostDominatorTree &PDT) 
     PDT.recalculate(F);
 }
 
-
 void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI, Function &F, DependenceInfo &DI, ScalarEvolution &SE, FunctionAnalysisManager &AM) {
-    //Replace the uses of the induction variable of the second loop with the induction variable of the first loop.
+
+    BranchInst *L1Guard = findGuard(L1, LI);
+    BranchInst *L2Guard = findGuard(L2, LI);
+
+    if (L1Guard && L2Guard) {
+        outs() << "Fusing guarded loops. Rewiring guards...\n";
+
+        BasicBlock *L1Preheader = L1->getLoopPreheader();
+        BasicBlock *finalExitBlock = (L2Guard->getSuccessor(0) == L2->getLoopPreheader()) ? L2Guard->getSuccessor(1) : L2Guard->getSuccessor(0);
+
+        unsigned fallthroughIndex = (L1Guard->getSuccessor(0) == L1Preheader) ? 1 : 0;
+        L1Guard->setSuccessor(fallthroughIndex, finalExitBlock);
+        
+        outs() << "Guard CFG rewired. First guard now jumps to final exit.\n";
+
+        BasicBlock *L1ExitBlock = L1->getExitBlock();
+        
+        if (L1ExitBlock && finalExitBlock) {
+            BranchInst *newTerminator = BranchInst::Create(finalExitBlock);
+            
+            ReplaceInstWithInst(L1ExitBlock->getTerminator(), newTerminator);
+            outs() << "Redirected L1 exit block to the final destination.\n";
+        }
+        
+    }
+
+    
     PHINode *index1 = L1->getCanonicalInductionVariable();
     PHINode *index2 = L2->getCanonicalInductionVariable();
 
-    //check if the induction variables were found
     if (!index1 || !index2) {
         outs() << "Induction variables not found\n";
         return;
     }
 
-    //replace the uses of L2's induction variable with the uses of L1's
     index2->replaceAllUsesWith(index1);
     index2->eraseFromParent();
 
-    //compute the exit blocks of L2
     SmallVector<BasicBlock *> L2_exit_blocks;
     L2->getExitBlocks(L2_exit_blocks);
 
-    //get loop headers
     BasicBlock *L1_header = L1->getHeader();
     BasicBlock *L2_header = L2->getHeader();
-
-    //get loop latches
     BasicBlock *L1_latch = L1->getLoopLatch();
     BasicBlock *L2_latch = L2->getLoopLatch();
-
-    //get loops body blocks
     BasicBlock *L1_body_end = L1_latch->getUniquePredecessor();
     BasicBlock *L2_body_end = L2_latch->getUniquePredecessor();
     BasicBlock *L2_body_start = nullptr;
@@ -95,29 +108,25 @@ void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, Lo
             break;
         }
     }
-    
-    for (BasicBlock *BB : L2_exit_blocks) {
-        for (pred_iterator pit = pred_begin(BB); pit != pred_end(BB); pit++) {
-            BasicBlock *predecessor = dyn_cast<BasicBlock>(*pit);
-            if (predecessor == L2_header) {
-                L1_header->getTerminator()->replaceUsesOfWith(L2->getLoopPreheader(), BB);
+
+    if (!L1Guard) {
+        for (BasicBlock *BB : L2_exit_blocks) {
+            for (pred_iterator pit = pred_begin(BB); pit != pred_end(BB); pit++) {
+                BasicBlock *predecessor = dyn_cast<BasicBlock>(*pit);
+                if (predecessor == L2_header) {
+                    L1_header->getTerminator()->replaceUsesOfWith(L2->getLoopPreheader(), BB);
+                }
             }
         }
     }
 
-    //link loop bodies
     if (L1_latch->getTerminator()->getNumSuccessors() == 1) {
-        //guarded loops, the latch has 1 successor: br label %for.inc
-        //Link L1 body to L2 body: br label %for.inc => br label %for.body4
         BranchInst *jump_to_L2_body = BranchInst::Create(L2_body_start);
         ReplaceInstWithInst(L1_body_end->getTerminator(), jump_to_L2_body);
     } else {
-        //unguarded loops, the latch has 2 successors: br i1 %cmp, label %do.body, label %do.end9
-        //update the phi node at start of L1: [ 0, %entry ], [ %inc, %do.cond ] => [ 0, %entry ], [ %inc, %do.cond7 ]
         Instruction &first = L1_header->front();
         BasicBlock *oldBB = L1_body_end->getTerminator()->getSuccessor(0);
         if (PHINode *phi = dyn_cast<PHINode>(&first)) {
-            // Iterate over all incoming values in the phi node
             for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
                 if (phi->getIncomingBlock(i) == oldBB) {
                     phi->setIncomingBlock(i, L2_body_start);
@@ -126,33 +135,22 @@ void fuseLoops(Loop *L1, Loop *L2, DominatorTree &DT, PostDominatorTree &PDT, Lo
                 }
             }
         }
-        //Link L1 body to L2 body: br label %do.cond => br label %do.body1
         BranchInst *jump_to_L2_body = BranchInst::Create(L2_body_start->getTerminator()->getSuccessor(0));
         ReplaceInstWithInst(L1_body_end->getTerminator(), jump_to_L2_body);
-        //update branch instruction in order to jump to the body of L1
-        //br i1 %cmp8, label %do.body1, label %do.end9 => br i1 %cmp8, label %do.body0, label %do.end9
         L2_body_start->getTerminator()->replaceUsesOfWith(L2_header, L1_header);
     }
 
-    //link L2 body to L1 latch
     BranchInst *jump_to_L1_latch = BranchInst::Create(L1_latch);
     ReplaceInstWithInst(L2_body_end->getTerminator(), jump_to_L1_latch);
 
-    //link L2 header to L2 latch
     BranchInst *jump_to_L2_latch = BranchInst::Create(L2_latch);
     ReplaceInstWithInst(L2_header->getTerminator(), jump_to_L2_latch);
 
-
-    //delete unreachable blocks
     EliminateUnreachableBlocks(F);
-
-
-    //update analysis info after the change
     updateAnalysisInfo(F, DT, PDT);
 
     outs() << "Deleted unreachable blocks\n";
 }
-
 
 bool areLoopsAdjacent(Loop *L1, Loop *L2, LoopInfo &LI) {
     if (!L1 || !L2) {
@@ -600,10 +598,6 @@ bool runOnFunction(Function &F, FunctionAnalysisManager &AM) {
     
     return changed; // Restituisce se sono state apportate modifiche
 }
-
-//=======================================================================================
-// 2. STRUTTURA DEL PASS PER IL NUOVO PASS MANAGER
-//=======================================================================================
 struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         bool changed = runOnFunction(F, AM);
@@ -617,10 +611,6 @@ struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
     }
 };
 
-
-//=======================================================================================
-// 3. REGISTRAZIONE DEL PLUGIN
-//=======================================================================================
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
     return {
