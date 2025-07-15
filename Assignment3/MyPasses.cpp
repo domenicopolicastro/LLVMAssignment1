@@ -73,17 +73,24 @@ bool hasUniqueDefinitionInLoop(Loop* L, Instruction* inst) {
 }
 
 bool dominatesAllUsesInLoop(DominatorTree &DT, Loop* L, Instruction* inst) {
-    //Prendo il blocco della mia istruzione candidata (loop semplice unico blocco?)
     BasicBlock* instBB = inst->getParent();
-    //Scorri tutti i punti dove la mia istruzione è usata come RHS
+
     for (Use &U : inst->uses()) {
-        //L'utilizzatore è una istruzione? Scrive su un registro?
         Instruction* userInst = dyn_cast<Instruction>(U.getUser());
-        //Questa istruzione che usa la mia candidata è nel loop stesso?
+
         if (userInst && L->contains(userInst)) {
-            //La definizione domina l'uso?
-            if (!DT.dominates(instBB, userInst->getParent())) {
-                return false;
+            // Caso speciale per i PHINode
+            if (PHINode* phi = dyn_cast<PHINode>(userInst)) {
+                // Ottieni il blocco predecessore associato a questo specifico uso.
+                // L'oggetto 'Use' sa a quale operando del PHI ci stiamo riferendo.
+                BasicBlock* incomingBlock = phi->getIncomingBlock(U);
+                if (!DT.dominates(instBB, incomingBlock)) {
+                    return false;
+                }
+            } else {
+                if (!DT.dominates(instBB, userInst->getParent())) {
+                    return false;
+                }
             }
         }
     }
